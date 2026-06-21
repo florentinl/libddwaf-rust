@@ -8,6 +8,25 @@ use lazy_static::lazy_static;
 
 const LIBDDWAF_SHARED_OBJECT: &[u8] = include_bytes!(env!("LIBDDWAF_SHARED_OBJECT.zst"));
 
+// Windows' LoadLibraryExW appends `.dll` when the file has no extension, so the extracted temporary
+// file must end in `.dll`. Other platforms' dlopen ignores the extension.
+#[cfg(windows)]
+const LIB_SUFFIX: &str = ".dll";
+#[cfg(not(windows))]
+const LIB_SUFFIX: &str = "";
+
+/// A placeholder [`libloading::Library`] wrapping a null module handle, used only for the
+/// [`Default`] fallback (its functions are never dispatched through this handle). `from_raw` takes
+/// a `*mut c_void` on unix and an integer `HMODULE` on Windows, hence the per-platform construction.
+#[cfg(unix)]
+fn null_library() -> libloading::Library {
+    unsafe { libloading::os::unix::Library::from_raw(std::ptr::null_mut()) }.into()
+}
+#[cfg(windows)]
+fn null_library() -> libloading::Library {
+    unsafe { libloading::os::windows::Library::from_raw(0) }.into()
+}
+
 lazy_static! {
     static ref LIBRARY: ddwaf = init().unwrap_or_default();
 }
@@ -18,7 +37,7 @@ lazy_static! {
 /// with the [ddwaf::new].
 fn init() -> Option<ddwaf> {
     tracing::debug!("dumping embedded libddwaf shared object to a temporary file...");
-    let mut tmp = match tempfile::NamedTempFile::new() {
+    let mut tmp = match tempfile::Builder::new().suffix(LIB_SUFFIX).tempfile() {
         Ok(tmp) => tmp,
         Err(e) => {
             tracing::error!("failed to create temporary file: {e}");
@@ -81,7 +100,7 @@ macro_rules! reexport {
                 )*
 
                 Self {
-                    __library: unsafe { libloading::os::unix::Library::from_raw(std::ptr::null_mut()) }.into(),
+                    __library: null_library(),
                     $($name),*
                 }
             }

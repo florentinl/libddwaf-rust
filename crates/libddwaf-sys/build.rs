@@ -83,17 +83,22 @@ fn main() {
         println!("cargo::rustc-link-lib=static=stdc++");
     }
 
-    // if we want to disable this in final binaries, see maybe
-    // https://github.com/rust-lang/cargo/issues/4789#issuecomment-2308131243
-    println!(
-        "cargo::rustc-link-arg=-Wl,-rpath,{}",
-        lib_dir.to_str().unwrap()
-    );
+    // rpath link-args use GNU ld / ld64 syntax and are rejected by the MSVC linker, so only emit
+    // them for non-Windows targets. They matter for the `dynamic-link` runtime search path; the
+    // `dynamic` feature dlopens an extracted copy and does not need them.
+    if !target.contains("windows") {
+        // if we want to disable this in final binaries, see maybe
+        // https://github.com/rust-lang/cargo/issues/4789#issuecomment-2308131243
+        println!(
+            "cargo::rustc-link-arg=-Wl,-rpath,{}",
+            lib_dir.to_str().unwrap()
+        );
 
-    #[cfg(target_os = "linux")]
-    println!("cargo::rustc-link-arg=-Wl,-rpath,$ORIGIN");
-    #[cfg(target_os = "macos")]
-    println!("cargo::rustc-link-arg=-Wl,-rpath,@loader_path");
+        #[cfg(target_os = "linux")]
+        println!("cargo::rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        #[cfg(target_os = "macos")]
+        println!("cargo::rustc-link-arg=-Wl,-rpath,@loader_path");
+    }
 
     // For the `dynamic` feature, embed a zstd-compressed copy of the shared library; it is extracted
     // and dlopen'd at runtime (see dylib.rs). This is independent of how the bindings are produced.
@@ -234,6 +239,22 @@ fn from_github_release(version: &str, out_dir: &Path) -> (PathBuf, PathBuf, &'st
             "x86_64-apple-darwin" => (
                 format!("libddwaf-{version}-darwin-x86_64.tar.gz"),
                 "libddwaf.dylib",
+            ),
+            // Windows: the release ships ddwaf.dll (+ ddwaf.lib import lib, ddwaf_static.lib).
+            // The `dynamic` feature embeds and dlopens ddwaf.dll; `dynamic-link` would link the
+            // import lib. The static-archive Unwind munging above only touches `.a` files, so it is
+            // skipped for these `.lib`/`.dll` artifacts.
+            "x86_64-pc-windows-msvc" => (
+                format!("libddwaf-{version}-windows-x64.tar.gz"),
+                "ddwaf.dll",
+            ),
+            "i686-pc-windows-msvc" => (
+                format!("libddwaf-{version}-windows-win32.tar.gz"),
+                "ddwaf.dll",
+            ),
+            "aarch64-pc-windows-msvc" => (
+                format!("libddwaf-{version}-windows-arm64.tar.gz"),
+                "ddwaf.dll",
             ),
             target => panic!("Unsupported target platform: {target}"),
         };
