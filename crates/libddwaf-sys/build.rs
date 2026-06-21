@@ -95,15 +95,32 @@ fn main() {
     #[cfg(target_os = "macos")]
     println!("cargo::rustc-link-arg=-Wl,-rpath,@loader_path");
 
-    // Bindings: by default we use the vendored, pre-generated bindings (src/bindings_prebuilt.rs)
-    // so consumers do NOT need libclang/bindgen at build time. We only run bindgen when:
-    //   * the `dynamic` feature is on (it needs dlopen-style bindings + an embedded .so), or
-    //   * LIBDDWAF_FORCE_BINDGEN is set (used to regenerate the vendored file after a header bump).
-    // libddwaf's C ABI is fixed-width and bindgen emits only std::os::raw::* aliases, so a single
-    // vendored bindings.rs is portable across the supported targets.
+    // For the `dynamic` feature, embed a zstd-compressed copy of the shared library; it is extracted
+    // and dlopen'd at runtime (see dylib.rs). This is independent of how the bindings are produced.
+    if feature_dynamic {
+        let filename = out_dir.join(format!("{soname}.zst"));
+        let zstd_file = File::create(&filename).expect("failed to create zstd file");
+        let mut zstd = zstd::Encoder::new(zstd_file, 22).expect("failed to create zstd encoder");
+
+        let mut so = File::open(lib_dir.join(soname)).expect("failed to open shared object file");
+        io::copy(&mut so, &mut zstd).expect("failed to write compressed shared object file");
+        zstd.finish().expect("failed to finish zstd compression");
+
+        println!(
+            "cargo::rustc-env=LIBDDWAF_SHARED_OBJECT.zst={}",
+            filename.display()
+        );
+    }
+
+    // Bindings: by default we use the vendored, pre-generated bindings so consumers do NOT need
+    // libclang/bindgen at build time. There are two vendored variants — the regular extern-fn
+    // bindings (static / dynamic-link) and the libloading struct bindings (the `dynamic` feature).
+    // libddwaf's C ABI is fixed-width and bindgen emits only std::os::raw::* (and libloading) types,
+    // so a single vendored file per variant is portable across the supported targets. We only run
+    // bindgen when LIBDDWAF_FORCE_BINDGEN is set (used to regenerate the vendored files).
     let bindings_out_path = out_dir.join("bindings.rs");
     let force_bindgen = env::var_os("LIBDDWAF_FORCE_BINDGEN").is_some();
-    if feature_dynamic || force_bindgen {
+    if force_bindgen {
         let builder = bindgen::Builder::default()
             .header(include_dir.join("ddwaf.h").to_str().unwrap())
             .clang_arg(format!("-I{}", include_dir.to_str().unwrap()))
@@ -113,19 +130,6 @@ fn main() {
             // Specifically allow-list supported/useful functions to avoid bloat.
             .allowlist_function("^ddwaf_.*");
         let builder = if feature_dynamic {
-            let filename = out_dir.join(format!("{soname}.zst"));
-            let zstd_file = File::create(&filename).expect("failed to create zstd file");
-            let mut zstd = zstd::Encoder::new(zstd_file, 22).expect("failed to create zstd encoder");
-
-            let mut so = File::open(lib_dir.join(soname)).expect("failed to open shared object file");
-            io::copy(&mut so, &mut zstd).expect("failed to write compressed shared object file");
-            zstd.finish().expect("failed to finish zstd compression");
-
-            println!(
-                "cargo::rustc-env=LIBDDWAF_SHARED_OBJECT.zst={}",
-                filename.display()
-            );
-
             builder
                 .dynamic_library_name("ddwaf")
                 .dynamic_link_require_all(true)
@@ -139,9 +143,14 @@ fn main() {
     } else {
         // Use the vendored bindings (no libclang required). Copy into OUT_DIR so the
         // `include!(concat!(env!("OUT_DIR"), "/bindings.rs"))` in lib.rs works unchanged.
+        let vendored_name = if feature_dynamic {
+            "bindings_prebuilt_dynamic.rs"
+        } else {
+            "bindings_prebuilt.rs"
+        };
         let vendored = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
             .join("src")
-            .join("bindings_prebuilt.rs");
+            .join(vendored_name);
         fs::copy(&vendored, &bindings_out_path).unwrap_or_else(|e| {
             panic!(
                 "failed to copy vendored bindings {}: {e}",
