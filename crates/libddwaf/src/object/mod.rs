@@ -168,23 +168,7 @@ impl WafObject {
     /// Returns [`None`] if parsing the JSON string into a [`WafObject`] was not
     /// possible, or if the input JSON string is larger than [`u32::MAX`] bytes.
     pub fn from_json(json: impl AsRef<[u8]>) -> Option<WafOwnedOutputAllocator<Self>> {
-        let mut output = WafOwnedOutputAllocator::<Self>::default();
-        let data = json.as_ref();
-        let Ok(len) = u32::try_from(data.len()) else {
-            return None;
-        };
-        if !unsafe {
-            let alloc = WafOwnedOutputAllocator::<Self>::allocator();
-            libddwaf_sys::ddwaf_object_from_json(
-                output.as_raw_mut(),
-                data.as_ptr().cast(),
-                len,
-                alloc,
-            )
-        } {
-            return None;
-        }
-        Some(output)
+        WafOwnedOutputAllocator::<Self>::from_json(json)
     }
 
     /// Returns the [`WafObjectType`] of the underlying value.
@@ -466,6 +450,35 @@ pub struct WafOwned<T: AsRawMutObject, A: AllocatorType = RustAllocator> {
 impl<T: AsRawMutObject, A: AllocatorType> WafOwned<T, A> {
     pub(crate) fn allocator() -> libddwaf_sys::ddwaf_allocator {
         A::allocator()
+    }
+}
+
+impl<A: AllocatorType> WafOwned<WafObject, A> {
+    /// Creates a new owned [`WafObject`] from a JSON string using this owned object's allocator.
+    ///
+    /// This is useful when the parsed object should be freed with a specific libddwaf allocator,
+    /// such as [`WafOwnedDefaultAllocator`] for input/config objects.
+    ///
+    /// # Returns
+    /// Returns [`None`] if parsing the JSON string into a [`WafObject`] was not
+    /// possible, or if the input JSON string is larger than [`u32::MAX`] bytes.
+    pub fn from_json(json: impl AsRef<[u8]>) -> Option<Self> {
+        let mut output = Self::default();
+        let data = json.as_ref();
+        let Ok(len) = u32::try_from(data.len()) else {
+            return None;
+        };
+        if !unsafe {
+            libddwaf_sys::ddwaf_object_from_json(
+                output.as_raw_mut(),
+                data.as_ptr().cast(),
+                len,
+                Self::allocator(),
+            )
+        } {
+            return None;
+        }
+        Some(output)
     }
 }
 
