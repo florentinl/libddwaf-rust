@@ -10,7 +10,7 @@
 use std::sync::LazyLock;
 use std::{sync::Arc, time::Duration};
 
-use libddwaf::object::WafOwnedDefaultAllocator;
+use libddwaf::object::{LibddwafDefaultAllocator, WafOwnedDefaultAllocator};
 use libddwaf::{
     object::{WafArray, WafMap, WafObject},
     waf_array, waf_map, Builder, Config, RunResult, RunnableContext,
@@ -195,6 +195,40 @@ fn basic_run_rule_with_no_match() {
             if let Some(attributes) = result.attributes() {
                 assert!(attributes.is_empty());
             }
+        }
+        _ => {
+            panic!("Unexpected result: {res:?}");
+        }
+    }
+}
+
+#[test]
+fn run_owned_default_allocator_rule_with_match() {
+    let mut builder = Builder::new(Some(&Config::default())).expect("Failed to create builder");
+    assert!(builder.add_or_update_config("rules", LazyLock::force(&ARACHNI_RULE), None));
+    let waf = builder.build().unwrap();
+    let mut ctx = waf.new_context();
+
+    let mut data = WafOwnedDefaultAllocator::<WafObject>::default();
+    data.set_map::<LibddwafDefaultAllocator>(1).unwrap();
+    let headers = data
+        .insert_key::<LibddwafDefaultAllocator>("server.request.headers.no_cookies")
+        .unwrap();
+    headers.set_map::<LibddwafDefaultAllocator>(1).unwrap();
+    headers
+        .insert_key::<LibddwafDefaultAllocator>("user-agent")
+        .unwrap()
+        .set_string::<LibddwafDefaultAllocator>("Arachni")
+        .unwrap();
+
+    let res = ctx.run_owned(data, Duration::from_secs(1));
+
+    match res {
+        Ok(RunResult::Match(result)) => {
+            assert!(!result.timeout());
+            assert!(result.keep());
+            assert_eq!(result.evaluated(), 1);
+            assert_eq!(result.events().expect("Expected some events").len(), 1);
         }
         _ => {
             panic!("Unexpected result: {res:?}");

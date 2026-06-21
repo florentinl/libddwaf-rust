@@ -258,6 +258,119 @@ impl WafObject {
     pub fn to_str(&self) -> Option<&str> {
         self.as_type::<WafString>().and_then(|x| x.as_str().ok())
     }
+
+    /// Initializes this object as a null value.
+    ///
+    /// This is intended for fresh or invalid objects, such as slots returned by
+    /// [`WafObject::insert`] or [`WafObject::insert_key`].
+    pub fn set_null(&mut self) -> Option<&mut Self> {
+        let ptr = unsafe { libddwaf_sys::ddwaf_object_set_null(self.as_raw_mut()) };
+        (!ptr.is_null()).then_some(self)
+    }
+
+    /// Initializes this object as a signed integer.
+    ///
+    /// This is intended for fresh or invalid objects, such as slots returned by
+    /// [`WafObject::insert`] or [`WafObject::insert_key`].
+    pub fn set_signed(&mut self, value: i64) -> Option<&mut Self> {
+        let ptr = unsafe { libddwaf_sys::ddwaf_object_set_signed(self.as_raw_mut(), value) };
+        (!ptr.is_null()).then_some(self)
+    }
+
+    /// Initializes this object as a boolean.
+    ///
+    /// This is intended for fresh or invalid objects, such as slots returned by
+    /// [`WafObject::insert`] or [`WafObject::insert_key`].
+    pub fn set_bool(&mut self, value: bool) -> Option<&mut Self> {
+        let ptr = unsafe { libddwaf_sys::ddwaf_object_set_bool(self.as_raw_mut(), value) };
+        (!ptr.is_null()).then_some(self)
+    }
+
+    /// Initializes this object as a floating point value.
+    ///
+    /// This is intended for fresh or invalid objects, such as slots returned by
+    /// [`WafObject::insert`] or [`WafObject::insert_key`].
+    pub fn set_float(&mut self, value: f64) -> Option<&mut Self> {
+        let ptr = unsafe { libddwaf_sys::ddwaf_object_set_float(self.as_raw_mut(), value) };
+        (!ptr.is_null()).then_some(self)
+    }
+
+    /// Initializes this object as a copied string using allocator `A`.
+    ///
+    /// This is intended for fresh or invalid objects, such as slots returned by
+    /// [`WafObject::insert`] or [`WafObject::insert_key`]. The string bytes are
+    /// copied by libddwaf, so the input slice only needs to live for this call.
+    pub fn set_string<A: AllocatorType>(&mut self, value: impl AsRef<[u8]>) -> Option<&mut Self> {
+        let value = value.as_ref();
+        let len = u32::try_from(value.len()).ok()?;
+        let ptr = unsafe {
+            libddwaf_sys::ddwaf_object_set_string(
+                self.as_raw_mut(),
+                value.as_ptr().cast(),
+                len,
+                A::allocator(),
+            )
+        };
+        (!ptr.is_null()).then_some(self)
+    }
+
+    /// Initializes this object as an array with the provided capacity using allocator `A`.
+    ///
+    /// This is intended for fresh or invalid objects.
+    pub fn set_array<A: AllocatorType>(&mut self, capacity: u16) -> Option<&mut Self> {
+        let ptr = unsafe {
+            libddwaf_sys::ddwaf_object_set_array(self.as_raw_mut(), capacity, A::allocator())
+        };
+        (!ptr.is_null()).then_some(self)
+    }
+
+    /// Initializes this object as a map with the provided capacity using allocator `A`.
+    ///
+    /// This is intended for fresh or invalid objects.
+    pub fn set_map<A: AllocatorType>(&mut self, capacity: u16) -> Option<&mut Self> {
+        let ptr = unsafe {
+            libddwaf_sys::ddwaf_object_set_map(self.as_raw_mut(), capacity, A::allocator())
+        };
+        (!ptr.is_null()).then_some(self)
+    }
+
+    /// Inserts a new value slot into this array using allocator `A`.
+    ///
+    /// Returns [`None`] if this object is not an array, the array is full, or allocation fails.
+    pub fn insert<A: AllocatorType>(&mut self) -> Option<&mut WafObject> {
+        let ptr = unsafe { libddwaf_sys::ddwaf_object_insert(self.as_raw_mut(), A::allocator()) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *ptr.cast::<WafObject>() })
+        }
+    }
+
+    /// Inserts a new value slot into this map with a copied key using allocator `A`.
+    ///
+    /// Returns [`None`] if this object is not a map, the map is full, the key is too large, or
+    /// allocation fails. The key bytes are copied by libddwaf, so the input slice only needs to live
+    /// for this call.
+    pub fn insert_key<A: AllocatorType>(
+        &mut self,
+        key: impl AsRef<[u8]>,
+    ) -> Option<&mut WafObject> {
+        let key = key.as_ref();
+        let len = u32::try_from(key.len()).ok()?;
+        let ptr = unsafe {
+            libddwaf_sys::ddwaf_object_insert_key(
+                self.as_raw_mut(),
+                key.as_ptr().cast(),
+                len,
+                A::allocator(),
+            )
+        };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *ptr.cast::<WafObject>() })
+        }
+    }
 }
 impl AsRef<libddwaf_sys::ddwaf_object> for WafObject {
     fn as_ref(&self) -> &libddwaf_sys::ddwaf_object {
@@ -506,6 +619,16 @@ impl<T: AsRawMutObject, A: AllocatorType> DerefMut for WafOwned<T, A> {
         &mut self.inner
     }
 }
+impl<T: AsRawMutObject, A: AllocatorType> AsRef<libddwaf_sys::ddwaf_object> for WafOwned<T, A> {
+    fn as_ref(&self) -> &libddwaf_sys::ddwaf_object {
+        self.inner.as_ref()
+    }
+}
+impl<T: AsRawMutObject, A: AllocatorType> AsRawMutObject for WafOwned<T, A> {
+    unsafe fn as_raw_mut(&mut self) -> &mut libddwaf_sys::ddwaf_object {
+        unsafe { self.inner.as_raw_mut() }
+    }
+}
 impl<T: AsRawMutObject, A: AllocatorType> Drop for WafOwned<T, A> {
     fn drop(&mut self) {
         unsafe {
@@ -521,6 +644,7 @@ where
         *self.inner == *other
     }
 }
+impl<T: AsRawMutObject, A: AllocatorType> crate::private::Sealed for WafOwned<T, A> {}
 
 /// Type alias for WAF-owned objects using the system default allocator.
 pub type WafOwnedDefaultAllocator<T> = WafOwned<T, LibddwafDefaultAllocator>;

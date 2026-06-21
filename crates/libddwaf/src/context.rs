@@ -2,9 +2,10 @@ use std::error;
 use std::fmt;
 use std::time::Duration;
 
-use crate::object::get_default_allocator;
 use crate::object::WafOwnedOutputAllocator;
-use crate::object::{AsRawMutObject, Keyed, WafArray, WafMap, WafObject};
+use crate::object::{
+    AllocatorType, AsRawMutObject, Keyed, RustAllocator, WafArray, WafMap, WafObject, WafOwned,
+};
 
 /// A WAF Context that can be used to evaluate the configured ruleset against address data.
 ///
@@ -34,6 +35,18 @@ pub trait RunnableContext {
     /// the request.
     fn run(&mut self, data: WafMap, timeout: Duration) -> Result<RunResult, RunError>;
 
+    /// Evaluates allocator-owned address data, using the allocator encoded by `data` when
+    /// transferring ownership to libddwaf.
+    ///
+    /// # Errors
+    /// Returns an error if the WAF encountered an internal error, invalid object, or invalid argument while processing
+    /// the request.
+    fn run_owned<A: AllocatorType>(
+        &mut self,
+        data: WafOwned<WafObject, A>,
+        timeout: Duration,
+    ) -> Result<RunResult, RunError>;
+
     /// Evaluates multiple batches of address data in sequence, and returns a combined result.
     ///
     /// Each element in `data` must be a [`WafMap`] containing address data. Addresses from earlier
@@ -58,6 +71,7 @@ fn run<S>(
     func: RunFunc<S>,
     func_name: &'static str,
     mut data: impl AsRawMutObject,
+    allocator: libddwaf_sys::ddwaf_allocator,
     timeout: Duration,
 ) -> Result<RunResult, RunError> {
     let mut res = std::mem::MaybeUninit::<RunOutput>::uninit();
@@ -68,7 +82,7 @@ fn run<S>(
         func(
             raw_self,
             data_ptr,
-            get_default_allocator().into(),
+            allocator,
             res.as_mut_ptr().cast(),
             timeout.as_micros().try_into().unwrap_or(u64::MAX),
         )
@@ -110,6 +124,22 @@ impl RunnableContext for Context {
             libddwaf_sys::ddwaf_context_eval,
             stringify!(libddwaf_sys::ddwaf_context_eval),
             data,
+            RustAllocator::allocator(),
+            timeout,
+        )
+    }
+
+    fn run_owned<A: AllocatorType>(
+        &mut self,
+        data: WafOwned<WafObject, A>,
+        timeout: Duration,
+    ) -> Result<RunResult, RunError> {
+        run(
+            self.raw,
+            libddwaf_sys::ddwaf_context_eval,
+            stringify!(libddwaf_sys::ddwaf_context_eval),
+            data,
+            A::allocator(),
             timeout,
         )
     }
@@ -120,6 +150,7 @@ impl RunnableContext for Context {
             libddwaf_sys::ddwaf_context_multieval,
             stringify!(libddwaf_sys::ddwaf_context_multieval),
             data,
+            RustAllocator::allocator(),
             timeout,
         )
     }
@@ -146,6 +177,22 @@ impl RunnableContext for Subcontext {
             libddwaf_sys::ddwaf_subcontext_eval,
             stringify!(libddwaf_sys::ddwaf_subcontext_eval),
             data,
+            RustAllocator::allocator(),
+            timeout,
+        )
+    }
+
+    fn run_owned<A: AllocatorType>(
+        &mut self,
+        data: WafOwned<WafObject, A>,
+        timeout: Duration,
+    ) -> Result<RunResult, RunError> {
+        run(
+            self.raw,
+            libddwaf_sys::ddwaf_subcontext_eval,
+            stringify!(libddwaf_sys::ddwaf_subcontext_eval),
+            data,
+            A::allocator(),
             timeout,
         )
     }
@@ -156,6 +203,7 @@ impl RunnableContext for Subcontext {
             libddwaf_sys::ddwaf_subcontext_multieval,
             stringify!(libddwaf_sys::ddwaf_subcontext_multieval),
             data,
+            RustAllocator::allocator(),
             timeout,
         )
     }
