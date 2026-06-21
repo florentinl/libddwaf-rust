@@ -132,6 +132,12 @@ fn main() {
             .default_visibility(bindgen::FieldVisibilityKind::Public)
             .derive_default(true)
             .prepend_enum_name(false)
+            // Disable layout tests: they bake the host's struct sizes/alignments (e.g. 16-byte
+            // ddwaf_object with 8-byte pointers) into const assertions, which fail to compile on
+            // targets with a different pointer width (e.g. 32-bit i686/win32). The struct
+            // definitions themselves remain correct per-target, so the vendored bindings stay
+            // portable across pointer widths once these assertions are removed.
+            .layout_tests(false)
             // Specifically allow-list supported/useful functions to avoid bloat.
             .allowlist_function("^ddwaf_.*");
         let builder = if feature_dynamic {
