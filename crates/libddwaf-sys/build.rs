@@ -95,42 +95,61 @@ fn main() {
     #[cfg(target_os = "macos")]
     println!("cargo::rustc-link-arg=-Wl,-rpath,@loader_path");
 
-    // Generate bindings with bindgen
-    let builder = bindgen::Builder::default()
-        .header(include_dir.join("ddwaf.h").to_str().unwrap())
-        .clang_arg(format!("-I{}", include_dir.to_str().unwrap()))
-        .default_visibility(bindgen::FieldVisibilityKind::Public)
-        .derive_default(true)
-        .prepend_enum_name(false)
-        // Specifically allow-list supported/useful functions to avoid bloat.
-        .allowlist_function("^ddwaf_.*");
-    let builder = if feature_dynamic {
-        let filename = out_dir.join(format!("{soname}.zst"));
-        let zstd_file = File::create(&filename).expect("failed to create zstd file");
-        let mut zstd = zstd::Encoder::new(zstd_file, 22).expect("failed to create zstd encoder");
-
-        let mut so = File::open(lib_dir.join(soname)).expect("failed to open shared object file");
-        io::copy(&mut so, &mut zstd).expect("failed to write compressed shared object file");
-        zstd.finish().expect("failed to finish zstd compression");
-
-        println!(
-            "cargo::rustc-env=LIBDDWAF_SHARED_OBJECT.zst={}",
-            filename.display()
-        );
-
-        builder
-            .dynamic_library_name("ddwaf")
-            .dynamic_link_require_all(true)
-    } else {
-        builder
-    };
-    let bindings = builder.generate().expect("Failed to generate bindings");
-
-    // Write the bindings to the output directory
+    // Bindings: by default we use the vendored, pre-generated bindings (src/bindings_prebuilt.rs)
+    // so consumers do NOT need libclang/bindgen at build time. We only run bindgen when:
+    //   * the `dynamic` feature is on (it needs dlopen-style bindings + an embedded .so), or
+    //   * LIBDDWAF_FORCE_BINDGEN is set (used to regenerate the vendored file after a header bump).
+    // libddwaf's C ABI is fixed-width and bindgen emits only std::os::raw::* aliases, so a single
+    // vendored bindings.rs is portable across the supported targets.
     let bindings_out_path = out_dir.join("bindings.rs");
-    bindings
-        .write_to_file(bindings_out_path)
-        .expect("Failed to write bindings.rs");
+    let force_bindgen = env::var_os("LIBDDWAF_FORCE_BINDGEN").is_some();
+    if feature_dynamic || force_bindgen {
+        let builder = bindgen::Builder::default()
+            .header(include_dir.join("ddwaf.h").to_str().unwrap())
+            .clang_arg(format!("-I{}", include_dir.to_str().unwrap()))
+            .default_visibility(bindgen::FieldVisibilityKind::Public)
+            .derive_default(true)
+            .prepend_enum_name(false)
+            // Specifically allow-list supported/useful functions to avoid bloat.
+            .allowlist_function("^ddwaf_.*");
+        let builder = if feature_dynamic {
+            let filename = out_dir.join(format!("{soname}.zst"));
+            let zstd_file = File::create(&filename).expect("failed to create zstd file");
+            let mut zstd = zstd::Encoder::new(zstd_file, 22).expect("failed to create zstd encoder");
+
+            let mut so = File::open(lib_dir.join(soname)).expect("failed to open shared object file");
+            io::copy(&mut so, &mut zstd).expect("failed to write compressed shared object file");
+            zstd.finish().expect("failed to finish zstd compression");
+
+            println!(
+                "cargo::rustc-env=LIBDDWAF_SHARED_OBJECT.zst={}",
+                filename.display()
+            );
+
+            builder
+                .dynamic_library_name("ddwaf")
+                .dynamic_link_require_all(true)
+        } else {
+            builder
+        };
+        let bindings = builder.generate().expect("Failed to generate bindings");
+        bindings
+            .write_to_file(&bindings_out_path)
+            .expect("Failed to write bindings.rs");
+    } else {
+        // Use the vendored bindings (no libclang required). Copy into OUT_DIR so the
+        // `include!(concat!(env!("OUT_DIR"), "/bindings.rs"))` in lib.rs works unchanged.
+        let vendored = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("src")
+            .join("bindings_prebuilt.rs");
+        fs::copy(&vendored, &bindings_out_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to copy vendored bindings {}: {e}",
+                vendored.display()
+            )
+        });
+        println!("cargo::rerun-if-changed={}", vendored.display());
+    }
 
     println!("cargo::rerun-if-changed=build.rs");
 }
