@@ -17,6 +17,11 @@ mod dylib;
 #[cfg(feature = "dynamic")]
 pub use dylib::*;
 
+#[cfg(feature = "dynamic-external")]
+mod dylib_external;
+#[cfg(feature = "dynamic-external")]
+pub use dylib_external::*;
+
 // Implement [Send] and [Sync] for [ddwaf_object]. There is nothing thread unsafe about these unless
 // its pointers are dereferences, which is inherently unsafe anyway.
 unsafe impl Send for ddwaf_object {}

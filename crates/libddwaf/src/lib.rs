@@ -97,6 +97,9 @@ macro_rules! forward {
 
 forward!(builder, config, context, handle);
 
+#[cfg(feature = "dynamic-external")]
+pub use libddwaf_sys::load;
+
 /// Returns the version of the underlying `libddwaf` library.
 #[must_use]
 pub fn version() -> &'static CStr {

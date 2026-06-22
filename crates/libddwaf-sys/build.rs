@@ -13,11 +13,12 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     let feature_dynamic = env::var("CARGO_FEATURE_DYNAMIC").is_ok();
+    let feature_dynamic_external = env::var("CARGO_FEATURE_DYNAMIC_EXTERNAL").is_ok();
     let feature_dynamic_link = env::var("CARGO_FEATURE_DYNAMIC_LINK").is_ok();
 
-    if feature_dynamic && feature_dynamic_link {
+    if (feature_dynamic as u8 + feature_dynamic_external as u8 + feature_dynamic_link as u8) > 1 {
         panic!(
-            "The `dynamic` and `dynamic-link` features are mutually exclusive. Please enable only one."
+            "The `dynamic`, `dynamic-external`, and `dynamic-link` features are mutually exclusive. Please enable only one."
         );
     }
 
@@ -67,7 +68,7 @@ fn main() {
     );
     if feature_dynamic_link {
         println!("cargo::rustc-link-lib=dylib=ddwaf");
-    } else if !feature_dynamic {
+    } else if !feature_dynamic && !feature_dynamic_external {
         println!("cargo::rustc-link-lib=static=ddwaf");
     }
 
@@ -104,19 +105,23 @@ fn main() {
         .prepend_enum_name(false)
         // Specifically allow-list supported/useful functions to avoid bloat.
         .allowlist_function("^ddwaf_.*");
-    let builder = if feature_dynamic {
-        let filename = out_dir.join(format!("{soname}.zst"));
-        let zstd_file = File::create(&filename).expect("failed to create zstd file");
-        let mut zstd = zstd::Encoder::new(zstd_file, 22).expect("failed to create zstd encoder");
+    let builder = if feature_dynamic || feature_dynamic_external {
+        if feature_dynamic {
+            let filename = out_dir.join(format!("{soname}.zst"));
+            let zstd_file = File::create(&filename).expect("failed to create zstd file");
+            let mut zstd =
+                zstd::Encoder::new(zstd_file, 22).expect("failed to create zstd encoder");
 
-        let mut so = File::open(lib_dir.join(soname)).expect("failed to open shared object file");
-        io::copy(&mut so, &mut zstd).expect("failed to write compressed shared object file");
-        zstd.finish().expect("failed to finish zstd compression");
+            let mut so =
+                File::open(lib_dir.join(soname)).expect("failed to open shared object file");
+            io::copy(&mut so, &mut zstd).expect("failed to write compressed shared object file");
+            zstd.finish().expect("failed to finish zstd compression");
 
-        println!(
-            "cargo::rustc-env=LIBDDWAF_SHARED_OBJECT.zst={}",
-            filename.display()
-        );
+            println!(
+                "cargo::rustc-env=LIBDDWAF_SHARED_OBJECT.zst={}",
+                filename.display()
+            );
+        }
 
         builder
             .dynamic_library_name("ddwaf")

@@ -22,6 +22,8 @@ fips = ["libddwaf-sys/fips"]
 serde = ["dep:serde"]
 # Embeds libddwaf and loads it with dlopen at runtime (no external library needed)
 dynamic = ["libddwaf-sys/dynamic"]
+# Loads libddwaf via dlopen from a path supplied by the caller at runtime (no embedded binary)
+dynamic-external = ["libddwaf-sys/dynamic-external"]
 # Links to libddwaf dynamically via system linker (requires libddwaf.so at runtime)
 dynamic-link = ["libddwaf-sys/dynamic-link"]
 # Link against libstdc++
