@@ -690,7 +690,12 @@ fn test_from_json() {
     assert!(WafObject::from_json("").is_none());
     // Invalid JSON (truncated)
     assert!(WafObject::from_json("{").is_none());
-    // Too large (but otherwise valid)
+    // Too large (but otherwise valid).
+    // Requires memory overcommit: the kernel must hand back a pointer for the 4 GB allocation
+    // without immediately backing it with physical pages, so that `from_json` can reject it by
+    // length before touching any data. Linux and macOS overcommit by default; Windows does not,
+    // so the allocation fails at commit time and Rust aborts the process via `handle_alloc_error`.
+    #[cfg(not(windows))]
     assert!(WafObject::from_json(format!(r#""{}""#, "a".repeat(u32::MAX as usize + 1))).is_none());
 }
 

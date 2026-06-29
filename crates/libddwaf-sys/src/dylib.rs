@@ -6,6 +6,16 @@ use crate::*;
 
 use lazy_static::lazy_static;
 
+#[cold]
+fn null_library() -> libloading::Library {
+    #[cfg(unix)]
+    return unsafe { libloading::os::unix::Library::from_raw(std::ptr::null_mut()) }.into();
+    #[cfg(windows)]
+    return unsafe { libloading::os::windows::Library::from_raw(0) }.into();
+    #[cfg(not(any(unix, windows)))]
+    panic!("unsupported platform for dynamic feature");
+}
+
 const LIBDDWAF_SHARED_OBJECT: &[u8] = include_bytes!(env!("LIBDDWAF_SHARED_OBJECT.zst"));
 
 lazy_static! {
@@ -44,11 +54,20 @@ fn init() -> Option<ddwaf> {
         return None;
     }
 
-    tracing::debug!(
-        "loading libddwaf shared object from temporary file {tmp}",
-        tmp = tmp.path().display()
-    );
-    match unsafe { ddwaf::new(tmp.path()) } {
+    // into_temp_path() closes the write handle (required on Windows: LoadLibraryExW cannot
+    // open a file while an existing write handle is open ÔÇö ERROR_SHARING_VIOLATION) while
+    // keeping the RAII deletion semantics of NamedTempFile. This makes cleanup panic-safe:
+    // if ddwaf::new() panics, the TempPath Drop runs and removes the file.
+    let path = tmp.into_temp_path();
+
+    tracing::debug!("loading libddwaf shared object from temporary file {}", path.display());
+    let result = unsafe { ddwaf::new(&*path) };
+    // TempPath::drop() attempts deletion here.
+    // On Unix: succeeds ÔÇö dlopen holds the inode open via its own fd, so the file data
+    //   persists until the library is unloaded.
+    // On Windows: fails silently ÔÇö the OS holds a mandatory file lock on loaded DLLs.
+    //   The file persists until OS temp cleanup since lazy_static never drops LIBRARY.
+    match result {
         Ok(lib) => Some(lib),
         Err(e) => {
             tracing::error!("failed to load libddwaf shared object: {e}");
@@ -64,9 +83,10 @@ fn init() -> Option<ddwaf> {
 /// library could not be loaded.
 macro_rules! reexport {
     (
-        $($vis:vis unsafe fn $name:ident($($arg_name:ident: $arg_type: ty),*) $(-> $ret_type:ty)? { $($fallback:expr)? })*
+        $($(#[$meta:meta])* $vis:vis unsafe fn $name:ident($($arg_name:ident: $arg_type: ty),*) $(-> $ret_type:ty)? { $($fallback:expr)? })*
     ) => {
         $(
+            $(#[$meta])*
             $vis unsafe extern "C" fn $name($($arg_name: $arg_type),*) $(-> $ret_type)? {
                 unsafe { LIBRARY.$name($($arg_name),*) }
             }
@@ -76,13 +96,14 @@ macro_rules! reexport {
             #[cold]
             fn default() -> Self {
                 $(
+                    $(#[$meta])*
                     #[cold]
                     unsafe extern "C" fn $name($($arg_name: $arg_type),*) $(-> $ret_type)? {$($fallback)?}
                 )*
 
                 Self {
-                    __library: unsafe { libloading::os::unix::Library::from_raw(std::ptr::null_mut()) }.into(),
-                    $($name),*
+                    __library: null_library(),
+                    $($(#[$meta])* $name,)*
                 }
             }
         }
@@ -147,7 +168,8 @@ reexport! {
     pub unsafe fn ddwaf_object_set_signed(object: *mut ddwaf_object, value: i64) -> *mut ddwaf_object { std::ptr::null_mut() }
     pub unsafe fn ddwaf_object_set_string(object: *mut ddwaf_object, string: *const ::std::os::raw::c_char, length: u32, alloc: ddwaf_allocator) -> *mut ddwaf_object { std::ptr::null_mut() }
     pub unsafe fn ddwaf_object_set_string_literal(object: *mut ddwaf_object, string: *const ::std::os::raw::c_char, length: u32) -> *mut ddwaf_object { std::ptr::null_mut() }
-    pub unsafe fn ddwaf_object_set_string_nocopy(object: *mut ddwaf_object, string: *const ::std::os::raw::c_char, length: u32) -> *mut ddwaf_object { std::ptr::null_mut() }
+    // Not exported from the Windows DLL; excluded from dynamic bindings on Windows.
+    #[cfg(not(windows))] pub unsafe fn ddwaf_object_set_string_nocopy(object: *mut ddwaf_object, string: *const ::std::os::raw::c_char, length: u32) -> *mut ddwaf_object { std::ptr::null_mut() }
     pub unsafe fn ddwaf_object_set_unsigned(object: *mut ddwaf_object, value: u64) -> *mut ddwaf_object { std::ptr::null_mut() }
     pub unsafe fn ddwaf_set_log_cb(cb: ddwaf_log_cb, min_level: DDWAF_LOG_LEVEL) -> bool { false }
     pub unsafe fn ddwaf_subcontext_destroy(subcontext: ddwaf_subcontext) {}

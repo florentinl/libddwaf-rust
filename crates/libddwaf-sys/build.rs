@@ -52,11 +52,15 @@ fn main() {
     let version =
         env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION environment variable not set");
 
+    // Note: We check the TARGET environment variable, not cfg!(target_os), because
+    // cfg! evaluates for the build script's host, not the cross-compilation target
+    let target = env::var("TARGET").expect("TARGET environment variable not set");
+
     // Check if a custom libddwaf installation prefix is provided
     let (include_dir, lib_dir, soname) = if let Some(prefix) = env::var_os("LIBDDWAF_PREFIX") {
-        from_installed_libddwaf(&prefix)
+        from_installed_libddwaf(&prefix, &target)
     } else {
-        from_github_release(&version, &out_dir)
+        from_github_release(&version, &out_dir, &target)
     };
     println!("cargo::rerun-if-env-changed=LIBDDWAF_PREFIX");
 
@@ -68,32 +72,40 @@ fn main() {
     if feature_dynamic_link {
         println!("cargo::rustc-link-lib=dylib=ddwaf");
     } else if !feature_dynamic {
-        println!("cargo::rustc-link-lib=static=ddwaf");
+        // On Windows the static archive is named ddwaf_static.lib; elsewhere libddwaf.a
+        if target.contains("windows") {
+            println!("cargo::rustc-link-lib=static=ddwaf_static");
+        } else {
+            println!("cargo::rustc-link-lib=static=ddwaf");
+        }
     }
 
     // macOS has libc++ only as a dynamic library, so it's not bundled in libddwaf.a/.so.
     // Linux needs to link against libstdc++ for C++ standard library symbols
     // This can be controlled via the `link-stdcxx` feature
-    // Note: We check the TARGET environment variable, not cfg!(target_os), because
-    // cfg! evaluates for the build script's host, not the cross-compilation target
-    let target = env::var("TARGET").expect("TARGET environment variable not set");
+    // Windows links the C++ runtime automatically via the import library.
     if target.contains("apple") || target.contains("darwin") {
         println!("cargo::rustc-link-lib=c++");
     } else if target.contains("linux") && env::var("CARGO_FEATURE_LINK_STDCXX").is_ok() {
         println!("cargo::rustc-link-lib=static=stdc++");
     }
 
+    // rpath is not applicable on Windows
     // if we want to disable this in final binaries, see maybe
     // https://github.com/rust-lang/cargo/issues/4789#issuecomment-2308131243
-    println!(
-        "cargo::rustc-link-arg=-Wl,-rpath,{}",
-        lib_dir.to_str().unwrap()
-    );
-
-    #[cfg(target_os = "linux")]
-    println!("cargo::rustc-link-arg=-Wl,-rpath,$ORIGIN");
-    #[cfg(target_os = "macos")]
-    println!("cargo::rustc-link-arg=-Wl,-rpath,@loader_path");
+    // rpath flags are ELF/Mach-O specific ÔÇö skip entirely for Windows targets.
+    // Use TARGET (runtime) not cfg!(target_os) (host) so cross-compilation works correctly.
+    if !target.contains("windows") {
+        println!(
+            "cargo::rustc-link-arg=-Wl,-rpath,{}",
+            lib_dir.to_str().unwrap()
+        );
+        if target.contains("linux") {
+            println!("cargo::rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        } else if target.contains("apple") || target.contains("darwin") {
+            println!("cargo::rustc-link-arg=-Wl,-rpath,@loader_path");
+        }
+    }
 
     // Generate bindings with bindgen
     let builder = bindgen::Builder::default()
@@ -105,6 +117,14 @@ fn main() {
         // Specifically allow-list supported/useful functions to avoid bloat.
         .allowlist_function("^ddwaf_.*");
     let builder = if feature_dynamic {
+        // ddwaf_object_set_string_nocopy is declared in ddwaf.h but not exported from
+        // the Windows DLL. Block it so dynamic_link_require_all doesn't fail on Windows.
+        let builder = if target.contains("windows") {
+            builder.blocklist_function("ddwaf_object_set_string_nocopy")
+        } else {
+            builder
+        };
+
         let filename = out_dir.join(format!("{soname}.zst"));
         let zstd_file = File::create(&filename).expect("failed to create zstd file");
         let mut zstd = zstd::Encoder::new(zstd_file, 22).expect("failed to create zstd encoder");
@@ -135,7 +155,10 @@ fn main() {
     println!("cargo::rerun-if-changed=build.rs");
 }
 
-fn from_installed_libddwaf(prefix: impl AsRef<OsStr>) -> (PathBuf, PathBuf, &'static str) {
+fn from_installed_libddwaf(
+    prefix: impl AsRef<OsStr>,
+    target: &str,
+) -> (PathBuf, PathBuf, &'static str) {
     println!(
         "cargo::warning=Using libddwaf installation from prefix: {:?}",
         prefix.as_ref()
@@ -152,9 +175,10 @@ fn from_installed_libddwaf(prefix: impl AsRef<OsStr>) -> (PathBuf, PathBuf, &'st
         panic!("Library directory not found at {}", lib_dir.display());
     }
 
-    // Determine the shared library name based on the target platform
-    let soname = if cfg!(target_os = "macos") {
+    let soname = if target.contains("apple") || target.contains("darwin") {
         "libddwaf.dylib"
+    } else if target.contains("windows") {
+        "ddwaf.dll"
     } else {
         "libddwaf.so"
     };
@@ -162,14 +186,15 @@ fn from_installed_libddwaf(prefix: impl AsRef<OsStr>) -> (PathBuf, PathBuf, &'st
     (include_dir, lib_dir, soname)
 }
 
-fn from_github_release(version: &str, out_dir: &Path) -> (PathBuf, PathBuf, &'static str) {
+fn from_github_release(
+    version: &str,
+    out_dir: &Path,
+    target: &str,
+) -> (PathBuf, PathBuf, &'static str) {
     // Download and extract libddwaf from GitHub releases
 
-    // Target triple for the current build
-    let target = env::var("TARGET").expect("TARGET environment variable not set");
-
     // Output directory
-    let download_dir = out_dir.join("download").join(&target);
+    let download_dir = out_dir.join("download").join(target);
     let include_dir = download_dir.join("include");
     let lib_dir = download_dir.join("lib");
 
@@ -178,7 +203,7 @@ fn from_github_release(version: &str, out_dir: &Path) -> (PathBuf, PathBuf, &'st
         let base_url = "https://github.com/DataDog/libddwaf/releases/download";
 
         // Map the target triple to the correct library archive
-        let (archive_name, soname) = match target.as_str() {
+        let (archive_name, soname) = match target {
             "x86_64-unknown-linux-gnu" => (
                 format!("libddwaf-{version}-x86_64-linux-musl.tar.gz"),
                 "libddwaf.so",
@@ -206,6 +231,18 @@ fn from_github_release(version: &str, out_dir: &Path) -> (PathBuf, PathBuf, &'st
             "x86_64-apple-darwin" => (
                 format!("libddwaf-{version}-darwin-x86_64.tar.gz"),
                 "libddwaf.dylib",
+            ),
+            "x86_64-pc-windows-msvc" => (
+                format!("libddwaf-{version}-windows-x64.tar.gz"),
+                "ddwaf.dll",
+            ),
+            "i686-pc-windows-msvc" => (
+                format!("libddwaf-{version}-windows-win32.tar.gz"),
+                "ddwaf.dll",
+            ),
+            "aarch64-pc-windows-msvc" => (
+                format!("libddwaf-{version}-windows-arm64.tar.gz"),
+                "ddwaf.dll",
             ),
             target => panic!("Unsupported target platform: {target}"),
         };

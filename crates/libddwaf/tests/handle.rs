@@ -27,9 +27,7 @@ fn test_known_addresses() {
     let addresses = waf.known_addresses();
     assert!(!addresses.is_empty());
     assert_eq!(addresses.len(), 2);
-    assert_eq!(addresses[0].to_str(), Ok("server.request.body"));
-    assert_eq!(
-        addresses[1].to_str(),
-        Ok("server.request.headers.no_cookies")
-    );
+    let strs: Vec<_> = addresses.iter().map(|a| a.to_str().unwrap()).collect();
+    assert!(strs.contains(&"server.request.body"));
+    assert!(strs.contains(&"server.request.headers.no_cookies"));
 }

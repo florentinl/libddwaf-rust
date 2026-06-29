@@ -245,7 +245,10 @@ fn test_eq_string() {
     assert_ne!(literal, ddwaf_object::default());
 }
 
+// ddwaf_object_set_string_nocopy is present in ddwaf_static.lib but not in ddwaf.dll or its
+// import library. Skip on Windows when linking against the DLL (dynamic / dynamic-link features).
 #[test]
+#[cfg(not(all(windows, any(feature = "dynamic", feature = "dynamic-link"))))]
 fn test_eq_string_types_with_allocator() {
     let alloc = unsafe { ddwaf_get_default_allocator() };
 
