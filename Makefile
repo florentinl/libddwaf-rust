@@ -37,6 +37,13 @@ leak_check:
 	RUSTFLAGS="-Zsanitizer=leak" LSAN_OPTIONS="symbolize=1:external_symbolizer_path=/usr/bin/addr2line" cargo +nightly test --all-targets --target-dir target/leak_check
 .PHONY: leak_check
 
+# Regenerate the pre-generated bindings from ddwaf.h using bindgen (requires libclang).
+# Run this after a libddwaf version bump and commit the updated files under bindings/.
+generate_bindings:
+	LIBDDWAF_SYS_UPDATE_BINDINGS=1 cargo build -p libddwaf-sys --features generate-bindings
+	LIBDDWAF_SYS_UPDATE_BINDINGS=1 cargo build -p libddwaf-sys --features generate-bindings,dynamic
+.PHONY: generate_bindings
+
 Cargo.lock: Cargo.toml
 	cargo check
 

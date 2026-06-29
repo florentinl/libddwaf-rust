@@ -107,52 +107,146 @@ fn main() {
         }
     }
 
-    // Generate bindings with bindgen
-    let builder = bindgen::Builder::default()
+    // For the dynamic feature: compress the shared object and expose it as a compile-time env var.
+    // This must happen regardless of whether bindings are generated or pre-generated.
+    if feature_dynamic {
+        compress_shared_object(&lib_dir, soname, &out_dir);
+    }
+
+    // Write bindings.rs to OUT_DIR.
+    // With the `generate-bindings` feature: use bindgen (requires libclang).
+    // Without it: copy from the pre-generated files committed under bindings/.
+    let bindings_out_path = out_dir.join("bindings.rs");
+
+    #[cfg(feature = "generate-bindings")]
+    generate_bindings(feature_dynamic, &target, &include_dir, &out_dir, &bindings_out_path);
+
+    #[cfg(not(feature = "generate-bindings"))]
+    {
+        let _ = &include_dir; // header not needed when using pre-generated bindings
+        copy_pregenerated_bindings(feature_dynamic, &target, &bindings_out_path);
+    }
+
+    println!("cargo::rerun-if-changed=build.rs");
+}
+
+/// Compresses the shared object and sets the `LIBDDWAF_SHARED_OBJECT.zst` env var so
+/// that `dylib.rs` can embed it via `include_bytes!(env!(...))`.
+fn compress_shared_object(lib_dir: &Path, soname: &str, out_dir: &Path) {
+    let filename = out_dir.join(format!("{soname}.zst"));
+    let zstd_file = File::create(&filename).expect("failed to create zstd file");
+    let mut zstd = zstd::Encoder::new(zstd_file, 22).expect("failed to create zstd encoder");
+
+    let mut so = File::open(lib_dir.join(soname)).expect("failed to open shared object file");
+    io::copy(&mut so, &mut zstd).expect("failed to write compressed shared object file");
+    zstd.finish().expect("failed to finish zstd compression");
+
+    println!(
+        "cargo::rustc-env=LIBDDWAF_SHARED_OBJECT.zst={}",
+        filename.display()
+    );
+}
+
+/// Generates bindings using bindgen and writes them to `out`.
+///
+/// When `LIBDDWAF_SYS_UPDATE_BINDINGS=1` is set the generated files are also copied back
+/// into the source tree under `bindings/` so they can be committed. This is the workflow
+/// for maintainers updating the pre-generated files after a libddwaf version bump:
+///
+/// ```sh
+/// LIBDDWAF_SYS_UPDATE_BINDINGS=1 cargo build -p libddwaf-sys --features generate-bindings
+/// LIBDDWAF_SYS_UPDATE_BINDINGS=1 cargo build -p libddwaf-sys --features generate-bindings,dynamic
+/// ```
+#[cfg(feature = "generate-bindings")]
+fn generate_bindings(
+    feature_dynamic: bool,
+    target: &str,
+    include_dir: &Path,
+    out_dir: &Path,
+    out: &Path,
+) {
+    let base = bindgen::Builder::default()
         .header(include_dir.join("ddwaf.h").to_str().unwrap())
         .clang_arg(format!("-I{}", include_dir.to_str().unwrap()))
         .default_visibility(bindgen::FieldVisibilityKind::Public)
         .derive_default(true)
         .prepend_enum_name(false)
-        // Specifically allow-list supported/useful functions to avoid bloat.
         .allowlist_function("^ddwaf_.*");
-    let builder = if feature_dynamic {
+
+    let update = env::var("LIBDDWAF_SYS_UPDATE_BINDINGS").is_ok();
+    let bindings_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("bindings");
+
+    if feature_dynamic {
         // ddwaf_object_set_string_nocopy is declared in ddwaf.h but not exported from
         // the Windows DLL. Block it so dynamic_link_require_all doesn't fail on Windows.
-        let builder = if target.contains("windows") {
-            builder.blocklist_function("ddwaf_object_set_string_nocopy")
-        } else {
-            builder
+        let target_builder = {
+            let b = if target.contains("windows") {
+                base.clone().blocklist_function("ddwaf_object_set_string_nocopy")
+            } else {
+                base.clone()
+            };
+            b.dynamic_library_name("ddwaf").dynamic_link_require_all(true)
         };
 
-        let filename = out_dir.join(format!("{soname}.zst"));
-        let zstd_file = File::create(&filename).expect("failed to create zstd file");
-        let mut zstd = zstd::Encoder::new(zstd_file, 22).expect("failed to create zstd encoder");
+        target_builder
+            .generate()
+            .expect("Failed to generate bindings")
+            .write_to_file(out)
+            .expect("Failed to write bindings.rs");
 
-        let mut so = File::open(lib_dir.join(soname)).expect("failed to open shared object file");
-        io::copy(&mut so, &mut zstd).expect("failed to write compressed shared object file");
-        zstd.finish().expect("failed to finish zstd compression");
-
-        println!(
-            "cargo::rustc-env=LIBDDWAF_SHARED_OBJECT.zst={}",
-            filename.display()
-        );
-
-        builder
-            .dynamic_library_name("ddwaf")
-            .dynamic_link_require_all(true)
+        if update {
+            if target.contains("windows") {
+                // Write the Windows variant (with blocklist applied)
+                fs::copy(out, bindings_dir.join("dynamic_windows.rs"))
+                    .expect("Failed to update bindings/dynamic_windows.rs");
+                // Also generate and write the non-Windows variant (no blocklist)
+                let full_builder = base
+                    .dynamic_library_name("ddwaf")
+                    .dynamic_link_require_all(true);
+                let tmp = out_dir.join("bindings_dynamic_full.rs");
+                full_builder
+                    .generate()
+                    .expect("Failed to generate full dynamic bindings")
+                    .write_to_file(&tmp)
+                    .expect("Failed to write full dynamic bindings");
+                fs::copy(&tmp, bindings_dir.join("dynamic.rs"))
+                    .expect("Failed to update bindings/dynamic.rs");
+            } else {
+                fs::copy(out, bindings_dir.join("dynamic.rs"))
+                    .expect("Failed to update bindings/dynamic.rs");
+            }
+        }
     } else {
-        builder
+        base.generate()
+            .expect("Failed to generate bindings")
+            .write_to_file(out)
+            .expect("Failed to write bindings.rs");
+
+        if update {
+            fs::copy(out, bindings_dir.join("default.rs"))
+                .expect("Failed to update bindings/default.rs");
+        }
+    }
+}
+
+/// Copies the appropriate pre-generated bindings file into `OUT_DIR/bindings.rs`.
+/// No libclang required.
+fn copy_pregenerated_bindings(feature_dynamic: bool, target: &str, out: &Path) {
+    let name = match (feature_dynamic, target.contains("windows")) {
+        (true, true) => "dynamic_windows.rs",
+        (true, false) => "dynamic.rs",
+        (false, _) => "default.rs",
     };
-    let bindings = builder.generate().expect("Failed to generate bindings");
-
-    // Write the bindings to the output directory
-    let bindings_out_path = out_dir.join("bindings.rs");
-    bindings
-        .write_to_file(bindings_out_path)
-        .expect("Failed to write bindings.rs");
-
-    println!("cargo::rerun-if-changed=build.rs");
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bindings")
+        .join(name);
+    fs::copy(&src, out).unwrap_or_else(|e| {
+        panic!(
+            "Failed to copy pre-generated bindings from {}: {e}",
+            src.display()
+        )
+    });
+    println!("cargo::rerun-if-changed={}", src.display());
 }
 
 fn from_installed_libddwaf(

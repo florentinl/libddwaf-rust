@@ -21,7 +21,9 @@ tracing = { version = "0.1", optional = true }
 zstd = { version = "0.13", optional = true }
 
 [build-dependencies]
-bindgen = "0.72"
+# bindgen is optional: only required when regenerating the pre-generated bindings
+# (enable with --features generate-bindings). End users do not need libclang installed.
+bindgen = { version = "0.72", optional = true }
 flate2 = "1.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "http2", "rustls-tls-native-roots-no-provider"] }
 tar = "0.4"
@@ -32,6 +34,9 @@ zstd = "0.13"
 
 [features]
 default = []
+# Regenerate bindings from ddwaf.h using bindgen (requires libclang). For maintainers only;
+# end users use the pre-generated bindings committed to the repository under bindings/.
+generate-bindings = ["dep:bindgen"]
 fips = ["hyper-rustls/fips", "rustls/fips"]
 # Embeds a compressed libddwaf.so and extracts it to a temporary file at runtime, then loads it with libloading/dlopen
 dynamic = ["lazy_static", "libloading", "tempfile", "tracing", "zstd"]
