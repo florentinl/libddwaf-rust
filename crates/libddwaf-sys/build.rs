@@ -232,10 +232,11 @@ fn generate_bindings(
 /// Copies the appropriate pre-generated bindings file into `OUT_DIR/bindings.rs`.
 /// No libclang required.
 fn copy_pregenerated_bindings(feature_dynamic: bool, target: &str, out: &Path) {
-    let name = match (feature_dynamic, target.contains("windows")) {
-        (true, true) => "dynamic_windows.rs",
-        (true, false) => "dynamic.rs",
-        (false, _) => "default.rs",
+    let name = match (feature_dynamic, target.contains("windows"), target.starts_with("i686-")) {
+        (true, true, _) => "dynamic_windows.rs",
+        (true, false, _) => "dynamic.rs",
+        (false, true, true) => "default_win32.rs",
+        (false, _, _) => "default.rs",
     };
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("bindings")
