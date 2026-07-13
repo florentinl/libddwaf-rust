@@ -78,6 +78,12 @@ fn main() {
         } else {
             println!("cargo::rustc-link-lib=static=ddwaf");
         }
+
+        // The official x86_64 Linux archive uses Clang CPU builtins that reference
+        // __cpu_model directly. Link its GCC implementation into shared objects.
+        if target == "x86_64-unknown-linux-gnu" {
+            println!("cargo::rustc-link-lib=static=gcc");
+        }
     }
 
     // macOS has libc++ only as a dynamic library, so it's not bundled in libddwaf.a/.so.
