@@ -80,9 +80,10 @@ fn main() {
         }
 
         // The official x86_64 Linux archive uses Clang CPU builtins that reference
-        // __cpu_model directly. Link its GCC implementation into shared objects.
+        // __cpu_model directly. Link its GCC implementation into shared objects,
+        // deferring lookup to the final linker so it uses the compiler's search paths.
         if target == "x86_64-unknown-linux-gnu" {
-            println!("cargo::rustc-link-lib=static=gcc");
+            println!("cargo::rustc-link-lib=static:-bundle=gcc");
         }
     }
 
